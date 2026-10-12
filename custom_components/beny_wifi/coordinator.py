@@ -34,6 +34,21 @@ from .conversions import convert_schedule, convert_timer, get_hex
 
 _LOGGER = logging.getLogger(__name__)
 
+
+def normalize_timer_fields(data: dict[str, Any]) -> dict[str, Any]:
+    """Normalize timer fields for charger firmware variants without a timer_state byte.
+
+    Some 3-phase/variant firmware replies omit timer_state entirely while still sending
+    a valid status payload. Home Assistant should treat that as an unset timer rather
+    than crashing the entire setup with a KeyError.
+    """
+    data["timer_state"] = data.get("timer_state", "UNSET")
+    data["timer_start_h"] = data.get("timer_start_h", 0)
+    data["timer_start_min"] = data.get("timer_start_min", 0)
+    data["timer_end_h"] = data.get("timer_end_h", 0)
+    data["timer_end_min"] = data.get("timer_end_min", 0)
+    return data
+
 # Default night mode window used when enabling night mode without prior state
 DEFAULT_NIGHT_START = 22  # 10pm
 DEFAULT_NIGHT_END = 6     # 6am
@@ -143,6 +158,15 @@ class BenyWifiUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         if persisted:
             _LOGGER.debug(f"DLB config restored from config_entry.options: {self._dlb_config}")  # noqa: G004
 
+        # Charger access control mirrors the Z-Box app's RFID / app-control / plug-and-play logic.
+        # The app treats plug-and-play as the negated state of both RFID and app control,
+        # so we keep the underlying booleans and derive the plug-and-play state from them.
+        persisted_charge_control = config_entry.options.get("charge_control", {})
+        self._charge_control: dict[str, bool] = {
+            "rfid_control": persisted_charge_control.get("rfid_control", False),
+            "app_control": persisted_charge_control.get("app_control", False),
+        }
+
         # Tracks consecutive polls where a DLB field returned None (sentinel/missing).
         # Incremented by BenyWifiLiveCoordinator; read by BenyWifiPowerSensor.available.
         # Once a field hits STALE_THRESHOLD, is_field_stale() returns True so
@@ -222,6 +246,54 @@ class BenyWifiUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self.hass.config_entries.async_update_entry(self.config_entry, options=options)
         _LOGGER.debug(f"DLB config persisted to config_entry.options: {self._dlb_config}")  # noqa: G004
 
+    async def _async_persist_charge_control(self) -> None:
+        """Persist charger access-control state so it survives HA restarts."""
+        options = dict(self.config_entry.options)
+        options["charge_control"] = dict(self._charge_control)
+        self.hass.config_entries.async_update_entry(self.config_entry, options=options)
+        _LOGGER.debug(f"Charge control persisted to config_entry.options: {self._charge_control}")  # noqa: G004
+
+    def _apply_charge_control_state(self, *, rfid: int | None = None, app_control: int | None = None) -> None:
+        """Update the cached access-control state from charger bytes.
+
+        The Z-Box app uses a mutually exclusive pattern: RFID and app-control are
+        each 0/1 booleans, while plug-and-play is the derived state when both are 0.
+        """
+        if rfid is not None:
+            self._charge_control["rfid_control"] = bool(rfid == 1)
+        if app_control is not None:
+            self._charge_control["app_control"] = bool(app_control == 1)
+
+    async def _async_refresh_charge_control_state(self) -> None:
+        """Read the charger's current access-control state and sync the cache."""
+        request = build_message(
+            CLIENT_MESSAGE.REQUEST_DATA,
+            {
+                "pin": get_config_parameter(self.config_entry, SECTION_DEVICE, CONF_PIN),
+                "request_type": get_hex(REQUEST_TYPE.SETTINGS.value),
+            },
+        ).encode("ascii")
+
+        loop = asyncio.get_running_loop()
+        try:
+            response_raw = await loop.run_in_executor(None, self._send_udp_request, request)
+            response = response_raw.decode("ascii", errors="replace")
+            if len(response) < 16 or not response.startswith("55aa"):
+                return
+
+            rfid = int(response[12:14], 16)
+            app_control = int(response[14:16], 16)
+            self._apply_charge_control_state(rfid=rfid, app_control=app_control)
+            await self._async_persist_charge_control()
+            _LOGGER.debug(
+                "Charging access refreshed from charger: rfid=%s app_control=%s plug_and_play=%s",
+                self._charge_control["rfid_control"],
+                self._charge_control["app_control"],
+                not (self._charge_control["rfid_control"] or self._charge_control["app_control"]),
+            )
+        except (ValueError, TypeError, OSError, UpdateFailed) as err:
+            _LOGGER.debug(f"Could not refresh charging access mode from charger: {err}")  # noqa: G004
+
     async def _fetch_data(self):
         """Send UDP request and fetch data asynchronously.
 
@@ -266,6 +338,8 @@ class BenyWifiUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
             if data['message_type'] == "SERVER_MESSAGE.ACCESS_DENIED":
                 raise UpdateFailed("Device denied request. Please reconfigure integration if your pin has changed")
+
+            data = normalize_timer_fields(data)
 
             # Validate timer values to prevent ValueError from firmware quirks
             # (e.g. Z-Box app setting unusual byte values on certain firmware versions)
@@ -397,6 +471,13 @@ class BenyWifiUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             # Expose current DLB config state so entities can read it
             data['dlb_config'] = dict(self._dlb_config)
 
+            # Keep the charging-access cache synced to the firmware state instead of
+            # defaulting to plug-and-play on startup or after a restart.
+            await self._async_refresh_charge_control_state()
+            data["rfid_control"] = self._charge_control["rfid_control"]
+            data["app_control"] = self._charge_control["app_control"]
+            data["plug_and_play"] = not (self._charge_control["rfid_control"] or self._charge_control["app_control"])
+
             return data
 
         except Exception as err:
@@ -432,28 +513,88 @@ class BenyWifiUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     async def async_toggle_charging(self, device_name: str, command: str):
         """Start or stop charging service."""
 
-        # check if charger is unplugged
+        # Do not block command sends when the state entity is missing or temporarily
+        # unavailable. Older config entries and brief coordinator outages can leave
+        # the state sensor absent even though the charger is still reachable.
         state_sensor_value = get_entity_state_by_key(self.hass, self.config_entry, "charger_state", "sensor")
+        current_state = state_sensor_value.state.lower() if state_sensor_value else None
 
-        if state_sensor_value and state_sensor_value.state != CHARGER_STATE.UNPLUGGED.name.lower():
-            if command == "start":
-                request = build_message(
-                    CLIENT_MESSAGE.SEND_CHARGER_COMMAND,
-                    {"pin": get_config_parameter(self.config_entry, SECTION_DEVICE, CONF_PIN), "charger_command": get_hex(CHARGER_COMMAND.START.value)}
-                ).encode('ascii')
-            elif command == "stop":
-                request = build_message(
-                    CLIENT_MESSAGE.SEND_CHARGER_COMMAND,
-                    {"pin": get_config_parameter(self.config_entry, SECTION_DEVICE, CONF_PIN), "charger_command": get_hex(CHARGER_COMMAND.STOP.value)}
-                ).encode('ascii')
-            else:
-                _LOGGER.error(f"Unknown command: {command}")
-                return
+        if current_state == CHARGER_STATE.UNPLUGGED.name.lower():
+            _LOGGER.info("%s: skipping %s charging command because charger is unplugged", device_name, command)
+            return
 
-            loop = asyncio.get_running_loop()
-            async with self._udp_lock:
-                await loop.run_in_executor(None, self._send_udp_request, request)
-            _LOGGER.info(f"{device_name}: {command} charging command sent")
+        if command == "start":
+            request = build_message(
+                CLIENT_MESSAGE.SEND_CHARGER_COMMAND,
+                {"pin": get_config_parameter(self.config_entry, SECTION_DEVICE, CONF_PIN), "charger_command": get_hex(CHARGER_COMMAND.START.value)}
+            ).encode('ascii')
+        elif command == "stop":
+            request = build_message(
+                CLIENT_MESSAGE.SEND_CHARGER_COMMAND,
+                {"pin": get_config_parameter(self.config_entry, SECTION_DEVICE, CONF_PIN), "charger_command": get_hex(CHARGER_COMMAND.STOP.value)}
+            ).encode('ascii')
+        else:
+            _LOGGER.error(f"Unknown command: {command}")
+            return
+
+        loop = asyncio.get_running_loop()
+        async with self._udp_lock:
+            await loop.run_in_executor(None, self._send_udp_request, request)
+        _LOGGER.info(f"{device_name}: {command} charging command sent")
+
+    async def async_set_charging_mode(
+        self,
+        device_name: str,
+        *,
+        rfid_control: bool | None = None,
+        app_control: bool | None = None,
+        plug_and_play: bool | None = None,
+    ) -> None:
+        """Set the Z-Box app's RFID/app-control/plug-and-play access flags.
+
+        The app treats plug-and-play as the inverse of both toggles: it is enabled only when
+        both RFID and app control are disabled. Hence we store the underlying booleans and
+        derive plug-and-play from them instead of sending an independent flag.
+        """
+        cfg = self._charge_control
+
+        if rfid_control is not None:
+            cfg["rfid_control"] = bool(rfid_control)
+            if cfg["rfid_control"]:
+                cfg["app_control"] = False
+        if app_control is not None:
+            cfg["app_control"] = bool(app_control)
+            if cfg["app_control"]:
+                cfg["rfid_control"] = False
+        if plug_and_play is not None:
+            enabled = bool(plug_and_play)
+            cfg["rfid_control"] = False if enabled else cfg["rfid_control"]
+            cfg["app_control"] = False if enabled else cfg["app_control"]
+            if not enabled and rfid_control is None and app_control is None:
+                cfg["rfid_control"] = False
+                cfg["app_control"] = False
+
+        request = build_message(
+            CLIENT_MESSAGE.SET_CHARGING_CONTROL,
+            {
+                "pin": get_config_parameter(self.config_entry, SECTION_DEVICE, CONF_PIN),
+                "rfid": format(int(cfg["rfid_control"]), "02x"),
+                "app_control": format(int(cfg["app_control"]), "02x"),
+            },
+        ).encode("ascii")
+
+        loop = asyncio.get_running_loop()
+        async with self._udp_lock:
+            await loop.run_in_executor(None, self._send_udp_request, request)
+
+        await self._async_persist_charge_control()
+        _LOGGER.info(
+            "%s: charging access set — rfid=%s app_control=%s plug_and_play=%s",
+            device_name,
+            cfg["rfid_control"],
+            cfg["app_control"],
+            not (cfg["rfid_control"] or cfg["app_control"]),
+        )
 
     async def async_set_max_monthly_consumption(self, device_name: str, maximum_consumption: int):
         """Set maximum consumption."""

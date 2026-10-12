@@ -129,6 +129,14 @@
       }
     },
     "select": {
+      "charging_mode": {
+        "name": "Charging Mode",
+        "state": {
+          "plug_and_play": "Plug and Play",
+          "app_control": "App Control",
+          "rfid_control": "RFID Control"
+        }
+      },
       "dlb_mode": {
         "name": "DLB Mode",
         "state": {
@@ -140,6 +148,15 @@
       }
     },
     "switch": {
+      "rfid_control": {
+        "name": "RFID Control"
+      },
+      "app_control": {
+        "name": "App Control"
+      },
+      "plug_and_play": {
+        "name": "Plug and Play"
+      },
       "dlb_enabled": {
         "name": "PV Dynamic Load Balance"
       },
@@ -175,7 +192,8 @@
             "description": "Device specific settings",
             "data": {
               "serial": "Serial number",
-              "pin": "PIN number"
+              "pin": "PIN number",
+              "rfid_enabled": "RFID support available"
             }
           },
           "section_current_limits": {
@@ -224,7 +242,8 @@
             "description": "Device specific settings",
             "data": {
               "serial": "Serial number",
-              "pin": "PIN number"
+              "pin": "PIN number",
+              "rfid_enabled": "RFID support available"
             }
           },
           "section_current_limits": {
@@ -265,7 +284,8 @@
       "serial_not_numeric": "Serial number should be numeric",
       "serial_length_invalid": "Serial number should be 9 characters long",
       "no_response_timeout": "No response from the device. Check serial and pin code",
-      "cannot_resolve_ip": "Device IP cannot be resolved by serial. You can try to set it manually"
+      "cannot_resolve_ip": "Device IP cannot be resolved by serial. You can try to set it manually",
+      "unsupported_ocpp_model": "This charger model uses OCPP/local LAN behavior and is not supported by the local UDP protocol used by this integration."
     }
   },
   "options": {

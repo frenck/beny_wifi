@@ -4,20 +4,22 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ConfigEntryNotReady
 from .const import (
+    CHARGER_TYPE,
     CONF_ANTI_OVERLOAD,
     CONF_ANTI_OVERLOAD_VALUE,
     DEFAULT_ANTI_OVERLOAD,
     DEFAULT_ANTI_OVERLOAD_VALUE,
     DLB,
-    DOMAIN, 
-    IP_ADDRESS, 
-    PLATFORMS, 
-    PORT, 
+    DOMAIN,
+    IP_ADDRESS,
+    MODEL,
+    PLATFORMS,
+    PORT,
     DEFAULT_PORT,
-    SCAN_INTERVAL, 
-    CONF_MAX_CURRENT_MIN, 
-    CONF_MAX_CURRENT_MAX, 
-    DEFAULT_MAX_CURRENT_MIN, 
+    SCAN_INTERVAL,
+    CONF_MAX_CURRENT_MIN,
+    CONF_MAX_CURRENT_MAX,
+    DEFAULT_MAX_CURRENT_MIN,
     DEFAULT_MAX_CURRENT_MAX,
     SERIAL,
     CONF_SERIAL,
@@ -27,7 +29,9 @@ from .const import (
     SECTION_DEVICE,
     SECTION_CURRENT_LIMITS,
     SECTION_DLB,
-    get_config_parameter
+    SINGLE_PHASE_CHARGERS,
+    THREE_PHASE_CHARGERS,
+    get_config_parameter,
 )
 from .coordinator import BenyWifiUpdateCoordinator, BenyWifiLiveCoordinator
 from .services import async_setup_services
@@ -105,7 +109,14 @@ async def async_migrate_entry(hass: HomeAssistant, config_entry: ConfigEntry) ->
 
     if config_entry.version == 1 or config_entry.version == 2:
         new_data = {**config_entry.data}
-        
+
+        legacy_device = dict(new_data.get(SECTION_DEVICE, {}))
+        legacy_model = legacy_device.get(MODEL, "")
+        if legacy_model in SINGLE_PHASE_CHARGERS:
+            legacy_device[CHARGER_TYPE] = "1P"
+        elif legacy_model in THREE_PHASE_CHARGERS:
+            legacy_device[CHARGER_TYPE] = "3P"
+
         new_data[SECTION_CONNECTION] = {
             PORT: config_entry.data.get(PORT, DEFAULT_PORT),
             IP_ADDRESS: config_entry.data.get(IP_ADDRESS, ""),
@@ -115,10 +126,11 @@ async def async_migrate_entry(hass: HomeAssistant, config_entry: ConfigEntry) ->
             CONF_SERIAL: config_entry.data.get(CONF_SERIAL, ""),
             CONF_PIN: config_entry.data.get(CONF_PIN, ""),
             DLB: config_entry.data.get(DLB, False),
+            **legacy_device,
         }
         new_data[SECTION_CURRENT_LIMITS] = {
             CONF_MAX_CURRENT_MIN: config_entry.data.get(CONF_MAX_CURRENT_MIN, DEFAULT_MAX_CURRENT_MIN),
-            CONF_MAX_CURRENT_MAX: config_entry.data.get(CONF_MAX_CURRENT_MAX, DEFAULT_MAX_CURRENT_MAX),  
+            CONF_MAX_CURRENT_MAX: config_entry.data.get(CONF_MAX_CURRENT_MAX, DEFAULT_MAX_CURRENT_MAX),
         }
         # Seed DLB section with defaults — Anti Overload was not configurable in v1/v2
         new_data[SECTION_DLB] = {
@@ -126,7 +138,7 @@ async def async_migrate_entry(hass: HomeAssistant, config_entry: ConfigEntry) ->
             CONF_ANTI_OVERLOAD: DEFAULT_ANTI_OVERLOAD,
             CONF_ANTI_OVERLOAD_VALUE: 15,
         }
-        
+
         # Update the entry with new sectioned data and version
         hass.config_entries.async_update_entry(config_entry, data=new_data, version=3)
 

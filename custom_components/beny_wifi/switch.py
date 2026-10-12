@@ -6,14 +6,14 @@ from homeassistant.helpers.entity import DeviceInfo
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .const import (
-    DLB, 
-    DOMAIN, 
-    MODEL, 
+    DLB,
+    DOMAIN,
+    MODEL,
     SERIAL,
     SECTION_DEVICE,
     SECTION_DLB,
     get_device_id,
-    get_config_parameter
+    get_config_parameter,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -52,6 +52,7 @@ async def async_setup_entry(hass, config_entry, async_add_entities):
 
     if entities:
         async_add_entities(entities)
+
 
 class BenyWifiDlbSwitch(CoordinatorEntity, SwitchEntity):
     """Base class for DLB boolean switches."""

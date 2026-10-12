@@ -45,6 +45,7 @@ PORT = "port"
 CONF_SERIAL = "serial"
 CONF_PIN = "pin"
 CONF_NUMERIC_PIN = "numeric_pin"
+CONF_RFID_ENABLED = "rfid_enabled"
 
 # Sections
 SECTION_CONNECTION: Final = "section_connection"
@@ -285,7 +286,11 @@ class COMMON(Enum):
     """Common mapping for fixed message contents."""
 
     FIXED_PART = {
-        "description": "Header of message",
+        "description": "Fixed message header. The Wi-Fi protocol uses a 55 aa request header "
+                       "or 55 cc response header, followed by a length byte and the payload. "
+                       "The firmware dispatches on the command selector in the payload, while "
+                       "the message_id field is the length/count field used for packet sizing; "
+                       "undersized frames are rejected before parsing.",
         "structure": {
             "header": slice(0, 4),
             "message_type": slice(4, 6),
@@ -326,6 +331,15 @@ class CLIENT_MESSAGE(Enum):
         "structure": {
             "pin": slice(13,18),
             "charger_command": slice(21, 22)
+        }
+    }
+    SET_CHARGING_CONTROL = {
+        "description": "Set RFID and app-control charging access flags.",
+        "hex": "55aa10000c000[pin]6a[rfid][app_control][checksum]",
+        "structure": {
+            "pin": slice(13,18),
+            "rfid": slice(21, 22),
+            "app_control": slice(22, 23),
         }
     }
     SET_TIMER = {

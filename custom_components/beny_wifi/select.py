@@ -1,4 +1,4 @@
-"""Select entities for Beny Wifi DLB mode control."""
+"""Select entities for Beny Wifi."""
 
 import logging
 from homeassistant.components.select import SelectEntity
@@ -6,11 +6,12 @@ from homeassistant.helpers.entity import DeviceInfo
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .const import (
-    DLB, 
-    DOMAIN, 
-    DLB_MODE, 
-    DLB_MODE_OPTIONS, 
-    MODEL, 
+    CONF_RFID_ENABLED,
+    DLB,
+    DOMAIN,
+    DLB_MODE,
+    DLB_MODE_OPTIONS,
+    MODEL,
     SERIAL,
     SECTION_DEVICE,
     SECTION_DLB,
@@ -33,19 +34,94 @@ async def async_setup_entry(hass, config_entry, async_add_entities):
     serial = get_config_parameter(config_entry, SECTION_DEVICE, SERIAL)
     device_model = get_config_parameter(config_entry, SECTION_DEVICE, MODEL)
     dlb = get_config_parameter(config_entry, SECTION_DLB, DLB)
+    rfid_enabled = get_config_parameter(config_entry, SECTION_DEVICE, CONF_RFID_ENABLED, False)
 
-    entities = []
+    entities = [
+        BenyWifiChargingModeSelect(
+            coordinator,
+            "charging_mode",
+            serial=serial,
+            device_model=device_model,
+            rfid_enabled=rfid_enabled,
+        )
+    ]
 
     if dlb:
         entities.append(
             BenyWifiDlbModeSelect(
-                coordinator, "dlb_mode",
-                serial=serial, device_model=device_model,
+                coordinator,
+                "dlb_mode",
+                serial=serial,
+                device_model=device_model,
             )
         )
 
     if entities:
         async_add_entities(entities)
+
+
+class BenyWifiChargingModeSelect(CoordinatorEntity, SelectEntity):
+    """Mutually exclusive charging-access mode selector."""
+
+    def __init__(self, coordinator, key, serial=None, device_model=None, rfid_enabled: bool = False):
+        """Initialize the charging-mode selector."""
+        super().__init__(coordinator)
+        self.coordinator = coordinator
+        self.key = key
+        self._attr_translation_key = key
+        self._serial = serial
+        self._device_model = device_model
+        self._attr_has_entity_name = True
+        self._attr_unique_id = f"{serial}_{key}"
+        self._attr_suggested_object_id = key
+        self._optimistic_option: str | None = None
+        self._attr_options = ["plug_and_play", "app_control"]
+        if rfid_enabled:
+            self._attr_options.insert(1, "rfid_control")
+
+    @property
+    def current_option(self) -> str:
+        """Return the currently selected charging mode."""
+        if self._optimistic_option is not None:
+            return self._optimistic_option
+
+        if self.coordinator._charge_control.get("rfid_control", False):
+            return "rfid_control"
+        if self.coordinator._charge_control.get("app_control", False):
+            return "app_control"
+        return "plug_and_play"
+
+    def _handle_coordinator_update(self) -> None:
+        """Clear optimistic state when fresh coordinator data arrives."""
+        self._optimistic_option = None
+        super()._handle_coordinator_update()
+
+    async def async_select_option(self, option: str) -> None:
+        """Handle user selecting a new charging mode."""
+        device_name = get_device_id(self.hass, self._serial, self._device_model)
+        if option == "rfid_control":
+            await self.coordinator.async_set_charging_mode(device_name, rfid_control=True)
+        elif option == "app_control":
+            await self.coordinator.async_set_charging_mode(device_name, app_control=True)
+        elif option == "plug_and_play":
+            await self.coordinator.async_set_charging_mode(device_name, plug_and_play=True)
+        else:
+            _LOGGER.error(f"Unknown charging mode option: {option}")
+            return
+
+        self._optimistic_option = option
+        self.async_write_ha_state()
+
+    @property
+    def device_info(self) -> DeviceInfo:
+        """Return device information."""
+        return DeviceInfo(
+            identifiers={(DOMAIN, self._serial)},
+            name=get_device_id(self.hass, self._serial, self._device_model),
+            manufacturer="ZJ Beny",
+            model=self._device_model,
+            serial_number=self._serial,
+        )
 
 
 class BenyWifiDlbModeSelect(CoordinatorEntity, SelectEntity):
@@ -63,7 +139,7 @@ class BenyWifiDlbModeSelect(CoordinatorEntity, SelectEntity):
         self._attr_icon = "mdi:solar-power"
         self._attr_options = list(DLB_MODE_OPTIONS.keys())
         self._attr_unique_id = f"{serial}_{key}"
-        self._attr_suggested_object_id = key  
+        self._attr_suggested_object_id = key
 
         # Optimistic label — set on user action, cleared on coordinator refresh
         self._optimistic_label: str | None = None
@@ -89,11 +165,11 @@ class BenyWifiDlbModeSelect(CoordinatorEntity, SelectEntity):
         if raw is not None:
             if raw == DLB_MODE.PURE_PV.value:
                 return _MODE_TO_LABEL[DLB_MODE.PURE_PV]
-            elif raw == DLB_MODE.FULL_SPEED.value:
+            if raw == DLB_MODE.FULL_SPEED.value:
                 return _MODE_TO_LABEL[DLB_MODE.FULL_SPEED]
-            elif raw == DLB_MODE.DLB_BOX.value:
+            if raw == DLB_MODE.DLB_BOX.value:
                 return _MODE_TO_LABEL[DLB_MODE.DLB_BOX]
-            elif HYBRID_CURRENT_MIN <= raw <= HYBRID_CURRENT_MAX:
+            if HYBRID_CURRENT_MIN <= raw <= HYBRID_CURRENT_MAX:
                 return _MODE_TO_LABEL[DLB_MODE.HYBRID]
 
         return _MODE_TO_LABEL[DLB_MODE.DLB_BOX]
@@ -122,7 +198,7 @@ class BenyWifiDlbModeSelect(CoordinatorEntity, SelectEntity):
         """Return device information."""
         return DeviceInfo(
             identifiers={(DOMAIN, self._serial)},
-            name = get_device_id(self.hass, self._serial, self._device_model),
+            name=get_device_id(self.hass, self._serial, self._device_model),
             manufacturer="ZJ Beny",
             model=self._device_model,
             serial_number=self._serial,

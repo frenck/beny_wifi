@@ -18,6 +18,7 @@ from .const import (
     CONF_MAX_CURRENT_MAX,
     CONF_MAX_CURRENT_MIN,
     CONF_PIN,
+    CONF_RFID_ENABLED,
     CONF_SERIAL,
     DEFAULT_ANTI_OVERLOAD,
     DEFAULT_ANTI_OVERLOAD_VALUE,
@@ -46,6 +47,12 @@ from .const import (
 from .conversions import convert_pin_to_hex, convert_serial_to_hex, get_hex
 
 _LOGGER = logging.getLogger(__name__)
+
+
+def is_unsupported_ocpp_model(model: str | None) -> bool:
+    """Return True for charger models that use the OCPP/local-LAN protocol."""
+    return bool(str(model or "").upper().endswith("-P"))
+
 
 class BenyWifiConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     """Handle a config flow for beny-wifi."""
@@ -132,6 +139,7 @@ class BenyWifiConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                         vol.Schema({
                             vol.Required(CONF_SERIAL, default=self._get_previous_user_input(user_input, SECTION_DEVICE, CONF_SERIAL, "")): str,
                             vol.Required(CONF_PIN, default=self._get_previous_user_input(user_input, SECTION_DEVICE, CONF_NUMERIC_PIN, "")): str,
+                            vol.Optional(CONF_RFID_ENABLED, default=self._get_previous_user_input(user_input, SECTION_DEVICE, CONF_RFID_ENABLED, False)): bool,
                         }), 
                         {"collapsed": False}
                     ),
@@ -212,6 +220,7 @@ class BenyWifiConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     vol.Required(SECTION_DEVICE): section(
                         vol.Schema({
                             vol.Required(CONF_PIN, default=self._get_previous_user_input(user_input, SECTION_DEVICE, CONF_NUMERIC_PIN, "", existing_entry)): str,
+                            vol.Optional(CONF_RFID_ENABLED, default=self._get_previous_user_input(user_input, SECTION_DEVICE, CONF_RFID_ENABLED, False, existing_entry)): bool,
                         }), 
                         {"collapsed": False}
                     ),
@@ -338,6 +347,14 @@ class BenyWifiConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 return None
 
             dev_data["model"] = data.get("model", "Charger")
+            if is_unsupported_ocpp_model(dev_data["model"]):
+                self._errors["base"] = "unsupported_ocpp_model"
+                _LOGGER.warning(
+                    "Unsupported charger model %s: local UDP polling is not supported for OCPP-style '%s' variants.",
+                    dev_data["model"],
+                    dev_data["model"],
+                )
+                return None
 
             return dev_data
 

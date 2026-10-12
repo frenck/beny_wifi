@@ -44,6 +44,13 @@ def read_message(data, msg_type:str | None = None) -> dict:  # noqa: C901
 
     """
 
+    # The charger protocol uses a fixed 2-byte lead-in (55 aa / 55 cc) plus a
+    # length-delimited payload and a final checksum byte. Reject malformed frames
+    # before checksum parsing so a tiny string cannot reach the fixed-header
+    # slicing logic and trigger ValueError during autodispatch.
+    if len(data) < 10 or len(data) % 2 != 0 or not data.startswith(("55aa", "55cc")):
+        return None
+
     # check if checksum matches before trying to translate
     if not validate_checksum(data):
         return None
